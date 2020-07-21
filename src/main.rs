@@ -6,73 +6,52 @@ use read_input::prelude::*;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::Arc;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::{thread, time};
 
-#[derive(PartialEq, Eq, Debug, Clone, Copy)]
-enum LinkPointer<'a> {
-    WikiLinker(&'a WikiLinker<'a>),
-    LinkFollower(usize),
-}
+//#[derive(PartialEq, Eq, Debug, Clone)]
+type LinkPointer = Option<Arc<LinkFollower>>;
 
-#[derive(Eq, Debug, Clone, Copy)]
-struct LinkFollower<'a> {
-    previous_links: LinkPointer<'a>,
+#[derive(Eq, Debug, Clone)]
+struct LinkFollower {
+    previous_links: LinkPointer,
     current_link: u32,
-    visited: bool,
 }
-impl<'follower> LinkFollower<'follower> {
-    fn new<'a>(id: u32, previous_links: LinkPointer<'a>) -> LinkFollower {
+impl LinkFollower {
+    fn new(id: u32, previous_links: LinkPointer) -> LinkFollower {
         LinkFollower {
             current_link: id,
             previous_links,
-            visited: false,
         }
     }
-    // fn get_wikilinker<'a>(&self) -> &'a WikiLinker {
-    //     let mut pointer = self.previous_links;
-    //     loop {
-    //         match pointer {
-    //             LinkPointer::LinkFollower(l) => {
-    //                 pointer = if l.1 {
-    //                     self.links[l.0]
-    //                 } else {
-    //                     self.backlinks[l.1]
-    //                 }
-    //             }
-    //             LinkPointer::WikiLinker(w) => {
-    //                 return w;
-    //             }
-    //         }
-    //     }
-    // }
-    fn get_links<'a>(&self) -> Vec<u32> {
+    fn get_links(&self) -> Vec<u32> {
         let mut links = Vec::new();
-        let mut pointer = self.previous_links;
+        let mut pointer = &self.previous_links;
         loop {
             match pointer {
-                LinkPointer::LinkFollower(l) => {
+                Some(l) => {
                     links.push(l.current_link);
-                    pointer = l.previous_links;
+                    pointer = &l.previous_links;
                 }
-                LinkPointer::WikiLinker(_) => {
+                None => {
                     return links;
                 }
             }
         }
     }
-    fn get_depth<'a>(&self) -> u32 {
+    fn get_depth(&self) -> u32 {
         let mut depth = 0;
-        let mut pointer = self.previous_links;
+        let mut pointer = &self.previous_links;
         loop {
             match pointer {
-                LinkPointer::LinkFollower(l) => {
+                Some(l) => {
                     depth += 1;
-                    pointer = l.previous_links;
+                    pointer = &l.previous_links;
                 }
-                LinkPointer::WikiLinker(_) => {
+                None => {
                     return depth;
                 }
             }
@@ -83,50 +62,21 @@ impl<'follower> LinkFollower<'follower> {
     //     self.previous_links.push(self.current_link);
     //     self.depth += 1;
     // }
-    fn combine(forward: &LinkFollower, backward: &LinkFollower) -> String {
-        let wl = forward.get_wikilinker();
-        assert_eq!(wl, backward.get_wikilinker());
-        let mut links = forward.get_links();
-        links.push(forward.current_link);
-        links.extend(&backward.get_links());
-        let mapping = wl.to_titles(&links).unwrap();
-        LinkFollower::combine_with_mapping(forward, backward, &mapping)
-    }
-    fn combine_with_mapping(
-        forward: &LinkFollower,
-        backward: &LinkFollower,
-        mapping: &HashMap<u32, String>,
-    ) -> String {
-        assert_eq!(forward.get_wikilinker(), backward.get_wikilinker());
-        let mut out = String::new();
-        for i in &forward.get_links() {
-            out += format!("{} -> ", mapping[i]).as_str();
-        }
-        out += format!("{}", mapping[&forward.current_link]).as_str();
-        for i in backward.get_links().iter().rev() {
-            out += format!(" -> {}", mapping[i]).as_str();
-        }
-        out += format!(" at depth {}", forward.get_depth() + backward.get_depth()).as_str();
-        out
-    }
 }
-impl fmt::Display for LinkFollower<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut links = self.get_links();
-        links.push(self.current_link);
-        let mapping = self.get_wikilinker().to_titles(&links).unwrap();
+impl fmt::Display for LinkFollower {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         for i in &self.get_links() {
-            write!(f, "{} -> ", mapping[i])?;
+            write!(f, "{} -> ", i)?;
         }
-        write!(f, "{}", mapping[&self.current_link])
+        write!(f, "{}", &self.current_link)
     }
 }
-impl PartialEq for LinkFollower<'_> {
+impl PartialEq for LinkFollower {
     fn eq(&self, other: &Self) -> bool {
         self.current_link == other.current_link
     }
 }
-impl Hash for LinkFollower<'_> {
+impl Hash for LinkFollower {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.current_link.hash(state);
     }
@@ -134,27 +84,47 @@ impl Hash for LinkFollower<'_> {
 
 #[derive(PartialEq, Eq, Debug, Clone)]
 struct WikiLinker<'a> {
-    links: Vec<LinkFollower<'a>>,
-    backlinks: Vec<LinkFollower<'a>>,
+    links: Vec<Arc<LinkFollower>>,
+    backlinks: Vec<Arc<LinkFollower>>,
     namespaces: &'a str,
     domain: &'a str,
 }
 
-struct Connection<'a> {
-    forward: &'a LinkFollower<'a>,
-    backward: &'a LinkFollower<'a>,
-}
 
 impl<'linker> WikiLinker<'linker> {
-    fn follower_from_link<'a>(&'a self, link: &str) -> Result<LinkFollower<'a>, &'static str> {
+    fn follower_from_link(&self, link: &str) -> Result<LinkFollower, &'static str> {
         let id = self.to_pageid(link)?;
         Ok(LinkFollower {
             current_link: id,
-            previous_links: LinkPointer::WikiLinker(self),
-            visited: false,
+            previous_links: None,
         })
     }
-    fn new<'a>() -> WikiLinker<'a> {
+    // fn combine(&self, forward: &LinkFollower, backward: &LinkFollower) -> String {
+    //     let mut links = forward.get_links();
+    //     links.push(forward.current_link);
+    //     links.extend(&backward.get_links());
+    //     let mapping = self.to_titles(&links).unwrap();
+    //     self.combine_with_mapping(forward, backward, &mapping)
+    // }
+    fn combine_with_mapping(
+        &self,
+        forward: &LinkFollower,
+        backward: &LinkFollower,
+        mapping: &HashMap<u32, String>,
+    ) -> String {
+        let mut out = String::new();
+        for i in &forward.get_links() {
+            out += format!("{} -> ", mapping[i]).as_str();
+        }
+        out += format!("{}", mapping[&forward.current_link]).as_str();
+        for i in &backward.get_links() {
+            out += format!(" -> {}", mapping[i]).as_str();
+        }
+        out += format!(" at depth {}", forward.get_depth() + backward.get_depth()).as_str();
+        out
+    }
+
+    fn new() -> Self {
         WikiLinker {
             links: vec![],
             backlinks: vec![],
@@ -302,7 +272,7 @@ impl<'linker> WikiLinker<'linker> {
         );
         let mut f = File::create(filename).unwrap();
         for c in connections {
-            let s = LinkFollower::combine_with_mapping(c.0, c.1, &mapping);
+            let s = self.combine_with_mapping(c.0, c.1, &mapping);
             println!("{}", s);
             writeln!(f, "{}", s).unwrap();
         }
@@ -352,7 +322,7 @@ impl<'linker> WikiLinker<'linker> {
         let mut linkarray = linkarray.unwrap_or_default();
         let redirects = redirects.unwrap();
         for a in 0..redirects.len() {
-            let linkfollower = LinkFollower::new(redirects[a], LinkPointer::WikiLinker(self));
+            let linkfollower = LinkFollower::new(redirects[a], None);
             match self.find_backlinks(&linkfollower) {
                 None => {}
                 Some(s) => {
@@ -429,12 +399,11 @@ impl<'linker> WikiLinker<'linker> {
         Some(titles)
     }
 
-    fn do_forward_link_pass(&'linker mut self) {
+    fn do_forward_link_pass(&mut self) {
         let length = self.links.len();
-        let mut linkarray: Vec<LinkFollower<'linker>> = self
+        let mut linkarray: Vec<Arc<LinkFollower>> = self
             .links
-            .iter()
-            .filter(|link| !link.visited)
+            .par_iter()
             .enumerate()
             .map(|(a, link)| {
                 let index = a + 1;
@@ -447,59 +416,27 @@ impl<'linker> WikiLinker<'linker> {
                     Some(s) => {
                         println!("{} / {} complete", index, length);
                         s.iter()
-                            .map(|item| LinkFollower::new(*item, LinkPointer::LinkFollower(&link)))
-                            .collect::<Vec<LinkFollower<'linker>>>()
+                            .map(|item| Arc::new(LinkFollower::new(*item, Some(link.clone()))))
+                            .collect::<Vec<Arc<LinkFollower>>>()
                     }
                 }
             })
             .flatten()
             .collect();
-        self.links.iter_mut().map(|link| {
-            link.visited = true;
-        });
-        // for a in 0..self.links.len() {
-        //     let index = a+1;
-        //     let mut link = self.links[a].clone();
-        //     let length = self.links.len();
-        //     let namespace = self.namespaces.clone();
-        //     let localarcmutex = Arc::clone(&arcmutex);
-        //     pool.execute(move || {
-        //         println!("{} / {} scheduled",index,length);
-        //         match WikiLinker::find_links(&link, &namespace) {
-        //             None => {println!("{} / {} failed",index,length);}
-        //             Some(s) => {
-        //                 println!("{} / {} centralizing",index,length);
-        //                 link.increment_link_for_movement();
-        //                 let mut uploadlinks = localarcmutex.lock().unwrap();
-        //                 println!("{} / {} lock achieved",index,length);
-        //                 for l in s {
-        //                     let mut newlink = link.clone();
-        //                     newlink.current_link = l;
-        //                     uploadlinks.push(newlink);
-        //                 }
-        //                 println!("{} / {} complete",index,length);
-        //             }
-        //         }
-        //     });
-        // }
-        // pool.join();
-        // println!("Retrieving lock...");
-        // let linkarray = Arc::try_unwrap(arcmutex).expect("Lock is still held somewhere!");
-        // let mut linkarray = linkarray.into_inner().expect("Mutex not unlocking");
         println!("Removing duplicates...");
         linkarray.retain(|x| !self.links.contains(&x));
-        self.links.extend(linkarray);
+        std::mem::swap(&mut self.links, &mut linkarray);
     }
-    fn do_backward_link_pass(&'linker mut self) {
+    fn do_backward_link_pass(&mut self) {
         let length = self.backlinks.len();
-        let mut linkarray: Vec<LinkFollower<'linker>> = self
+        let mut linkarray: Vec<Arc<LinkFollower>> = self
             .backlinks
-            .iter()
+            .par_iter()
             .enumerate()
             .map(|(a, link)| {
                 let index = a + 1;
                 println!("{} \\ {} scheduled", index, length);
-                match self.find_links(&link) {
+                match self.find_backlinks(&link) {
                     None => {
                         println!("{} \\ {} failed", index, length);
                         vec![]
@@ -507,8 +444,8 @@ impl<'linker> WikiLinker<'linker> {
                     Some(s) => {
                         println!("{} \\ {} complete", index, length);
                         s.iter()
-                            .map(|item| LinkFollower::new(*item, LinkPointer::LinkFollower(&link)))
-                            .collect::<Vec<LinkFollower<'linker>>>()
+                            .map(|item| Arc::new(LinkFollower::new(*item, Some(link.clone()))))
+                            .collect::<Vec<Arc<LinkFollower>>>()
                     }
                 }
             })
@@ -516,12 +453,12 @@ impl<'linker> WikiLinker<'linker> {
             .collect();
         println!("Removing duplicates...");
         linkarray.retain(|x| !self.backlinks.contains(&x));
-        self.backlinks.extend(linkarray);
+        std::mem::swap(&mut self.backlinks, &mut linkarray);
     }
 
-    fn perform_search<'a: 'linker>(&'a mut self, start: &str, end: &str) {
-        self.links.push(self.follower_from_link(start).unwrap());
-        self.backlinks.push(self.follower_from_link(end).unwrap());
+    fn perform_search(&mut self, start: &str, end: &str) {
+        self.links.push(Arc::new(self.follower_from_link(start).unwrap()));
+        self.backlinks.push(Arc::new(self.follower_from_link(end).unwrap()));
         if self.check_end() {
             return;
         }
