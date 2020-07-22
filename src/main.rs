@@ -1,4 +1,5 @@
 use chrono::prelude::*;
+use itertools::Itertools;
 use percent_encoding::{utf8_percent_encode, DEFAULT_ENCODE_SET};
 use rand::distributions::{Distribution, Uniform};
 use rayon::prelude::*;
@@ -6,10 +7,10 @@ use read_input::prelude::*;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::Arc;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
+use std::sync::Arc;
 use std::{thread, time};
 
 //#[derive(PartialEq, Eq, Debug, Clone)]
@@ -65,7 +66,7 @@ impl LinkFollower {
 }
 impl fmt::Display for LinkFollower {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for i in &self.get_links() {
+        for i in self.get_links().iter().rev() {
             write!(f, "{} -> ", i)?;
         }
         write!(f, "{}", &self.current_link)
@@ -90,7 +91,6 @@ struct WikiLinker<'a> {
     domain: &'a str,
 }
 
-
 impl<'linker> WikiLinker<'linker> {
     fn follower_from_link(&self, link: &str) -> Result<LinkFollower, &'static str> {
         let id = self.to_pageid(link)?;
@@ -113,10 +113,10 @@ impl<'linker> WikiLinker<'linker> {
         mapping: &HashMap<u32, String>,
     ) -> String {
         let mut out = String::new();
-        for i in &forward.get_links() {
+        for i in forward.get_links().iter().rev() {
             out += format!("{} -> ", mapping[i]).as_str();
         }
-        out += format!("{}", mapping[&forward.current_link]).as_str();
+        out += mapping[&forward.current_link].as_str();
         for i in &backward.get_links() {
             out += format!(" -> {}", mapping[i]).as_str();
         }
@@ -181,18 +181,18 @@ impl<'linker> WikiLinker<'linker> {
             "-1" => Err("Page does not exist."),
             s => Ok(s
                 .parse::<u32>()
-                .expect(format!("{} is not a pageid, api gave wrong value?", s).as_str())),
+                .unwrap_or_else(|_| panic!("{} is not a pageid, api gave wrong value?", s))),
         }
     }
 
-    fn to_titles(&self, pageids: &Vec<u32>) -> Result<HashMap<u32, String>, &'static str> {
+    fn to_titles(&self, pageids: &[u32]) -> Result<HashMap<u32, String>, &'static str> {
         if pageids.len() > 50 {
             return Err("Too many titles");
         }
         let uri = format!(
             "https://{1}/api.php?action=query&format=json&redirects=1&pageids={0}",
             pageids
-                .into_iter()
+                .iter()
                 .map(|x| x.to_string())
                 .collect::<Vec<String>>()
                 .join("|"),
@@ -214,33 +214,15 @@ impl<'linker> WikiLinker<'linker> {
 
     fn check_end(&mut self) -> bool {
         println!("Checking pages...");
-        let mut connections: HashSet<(&LinkFollower, &LinkFollower)> = HashSet::new();
-        //let connections = Arc::new(Mutex::new(connections));
-        //let mut tasks = Vec::new();
-        //for index in 0..self.links.len() {
-        //    let llinks = Arc::clone(&self.links);
-        //    let lbacklinks = Arc::clone(&self.backlinks);
-        //    let lconnections = Arc::clone(&connections);
-        //    tasks.push(thread::spawn(move || {
-        //        let mut local = HashSet::new();
-        //        for b in lbacklinks.iter() {
-        //            if llinks[index] == *b {
-        //                local.insert((&llinks[index],b));
-        //            }
-        //        }
-        //        let mut c = lconnections.lock().unwrap();
-        //        c.extend(local);
-        //    }));
-        //}
-        //for t in tasks {t.join();}
-        //let connections = Arc::try_unwrap(connections).unwrap().into_inner().unwrap();
-        for f in self.links.iter() {
-            for b in self.backlinks.iter() {
-                if f == b {
-                    connections.insert((&f, &b));
-                }
-            }
-        }
+        let mut connections: HashSet<(&Arc<LinkFollower>, &Arc<LinkFollower>)> = HashSet::new();
+        connections.par_extend(
+            self.links
+                .iter()
+                .cartesian_product(&self.backlinks)
+                .collect::<Vec<(&Arc<LinkFollower>, &Arc<LinkFollower>)>>()
+                .par_iter()
+                .filter(|(f, b)| f == b),
+        );
         if connections.is_empty() {
             return false;
         }
@@ -254,10 +236,10 @@ impl<'linker> WikiLinker<'linker> {
         let mapping = pageids // this is a mess and i love it
             .into_iter()
             .collect::<Vec<u32>>()
-            .chunks(50) 
+            .chunks(50)
             .collect::<Vec<&[u32]>>()
             .par_iter()
-            .map(|chunk| self.to_titles(&chunk.to_vec()).unwrap())
+            .map(|chunk| self.to_titles(&chunk).unwrap())
             .flatten()
             .collect();
         let now = Utc::now();
@@ -299,16 +281,16 @@ impl<'linker> WikiLinker<'linker> {
             }
             let newpages = pagecontent["query"]["pageids"].as_array()?;
             let mut newpages = newpages
-                .into_iter()
+                .iter()
                 .map(|x| {
                     x.as_str()
                         .unwrap()
                         .parse::<i64>()
-                        .expect(&format!("Value is {}", x.as_str().unwrap().to_string()))
+                        .unwrap_or_else(|_| panic!("Value is {}", x.as_str().unwrap()))
                 })
                 .collect::<Vec<i64>>();
             newpages.retain(|&x| x > 0);
-            titles.extend(newpages.into_iter().map(|x| x as u32));
+            titles.extend(newpages.iter().map(|x| *x as u32));
         }
         Some(titles)
     }
@@ -321,8 +303,8 @@ impl<'linker> WikiLinker<'linker> {
         }
         let mut linkarray = linkarray.unwrap_or_default();
         let redirects = redirects.unwrap();
-        for a in 0..redirects.len() {
-            let linkfollower = LinkFollower::new(redirects[a], None);
+        for r in redirects {
+            let linkfollower = LinkFollower::new(r, None);
             match self.find_backlinks(&linkfollower) {
                 None => {}
                 Some(s) => {
@@ -357,11 +339,11 @@ impl<'linker> WikiLinker<'linker> {
             }
             let newpages = newpages["linkshere"].as_array().unwrap();
             let mut newpages = newpages
-                .into_iter()
+                .iter()
                 .map(|x| x["pageid"].as_i64().unwrap())
                 .collect::<Vec<i64>>();
             newpages.retain(|&x| x > 0);
-            titles.extend(newpages.into_iter().map(|x| x as u32));
+            titles.extend(newpages.iter().map(|x| *x as u32));
         }
         Some(titles)
     }
@@ -390,11 +372,11 @@ impl<'linker> WikiLinker<'linker> {
             }
             let newpages = newpages["redirects"].as_array().unwrap();
             let mut newpages = newpages
-                .into_iter()
+                .iter()
                 .map(|x| x["pageid"].as_i64().unwrap())
                 .collect::<Vec<i64>>();
             newpages.retain(|&x| x > 0);
-            titles.extend(newpages.into_iter().map(|x| x as u32));
+            titles.extend(newpages.iter().map(|x| *x as u32));
         }
         Some(titles)
     }
@@ -457,8 +439,10 @@ impl<'linker> WikiLinker<'linker> {
     }
 
     fn perform_search(&mut self, start: &str, end: &str) {
-        self.links.push(Arc::new(self.follower_from_link(start).unwrap()));
-        self.backlinks.push(Arc::new(self.follower_from_link(end).unwrap()));
+        self.links
+            .push(Arc::new(self.follower_from_link(start).unwrap()));
+        self.backlinks
+            .push(Arc::new(self.follower_from_link(end).unwrap()));
         if self.check_end() {
             return;
         }
@@ -468,7 +452,7 @@ impl<'linker> WikiLinker<'linker> {
                 if self.check_end() {
                     return;
                 }
-                if self.backlinks.len() == 0 {
+                if self.backlinks.is_empty() {
                     eprintln!("No article has a link to {}", end);
                     return;
                 }
@@ -477,7 +461,7 @@ impl<'linker> WikiLinker<'linker> {
             if self.check_end() {
                 return;
             }
-            if self.links.len() == 0 {
+            if self.links.is_empty() {
                 eprintln!("{} is a dead end", start);
                 return;
             }
@@ -491,7 +475,7 @@ fn main() {
         .msg("Enter a domain (default is en.wikipedia.org/w/): ")
         .default(String::from("en.wikipedia.org/w"))
         .get();
-    if domain.ends_with("/") {
+    if domain.ends_with('/') {
         domain.pop();
     }
     let domain = domain;
