@@ -1,5 +1,4 @@
 use chrono::prelude::*;
-use itertools::Itertools;
 use percent_encoding::{utf8_percent_encode, DEFAULT_ENCODE_SET};
 use rand::distributions::{Distribution, Uniform};
 use rayon::prelude::*;
@@ -214,13 +213,11 @@ impl<'linker> WikiLinker<'linker> {
 
     fn check_end(&mut self) -> bool {
         println!("Checking pages...");
-        let mut connections: HashSet<(&Arc<LinkFollower>, &Arc<LinkFollower>)> = HashSet::new();
+        let mut connections: HashSet<(Arc<LinkFollower>, Arc<LinkFollower>)> = HashSet::new();
         connections.par_extend(
             self.links
-                .iter()
-                .cartesian_product(&self.backlinks)
-                .collect::<Vec<(&Arc<LinkFollower>, &Arc<LinkFollower>)>>()
                 .par_iter()
+                .flat_map(|f| self.backlinks.par_iter().map(move |b| (f.clone(),b.clone())))
                 .filter(|(f, b)| f == b),
         );
         if connections.is_empty() {
@@ -254,7 +251,7 @@ impl<'linker> WikiLinker<'linker> {
         );
         let mut f = File::create(filename).unwrap();
         for c in connections {
-            let s = self.combine_with_mapping(c.0, c.1, &mapping);
+            let s = self.combine_with_mapping(&c.0, &c.1, &mapping);
             println!("{}", s);
             writeln!(f, "{}", s).unwrap();
         }
@@ -506,4 +503,7 @@ fn main() {
         .unwrap();
     wl.domain = domain.as_str();
     wl.perform_search(&firstlink, &endlink);
+    drop(wl);
+    let _ = input::<String>().get();
+    println!("exit");
 }
