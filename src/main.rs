@@ -5,6 +5,7 @@ use rayon::prelude::*;
 use read_input::prelude::*;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::env::args;
 use std::fmt;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
@@ -127,7 +128,7 @@ impl<'linker> WikiLinker<'linker> {
         WikiLinker {
             links: vec![],
             backlinks: vec![],
-            namespaces: "0",
+            namespaces: "0|14|100",
             domain: "en.wikipedia.org/w",
         }
     }
@@ -217,7 +218,11 @@ impl<'linker> WikiLinker<'linker> {
         connections.par_extend(
             self.links
                 .par_iter()
-                .flat_map(|f| self.backlinks.par_iter().map(move |b| (f.clone(),b.clone())))
+                .flat_map(|f| {
+                    self.backlinks
+                        .par_iter()
+                        .map(move |b| (f.clone(), b.clone()))
+                })
                 .filter(|(f, b)| f == b),
         );
         if connections.is_empty() {
@@ -467,43 +472,52 @@ impl<'linker> WikiLinker<'linker> {
 }
 
 fn main() {
-    let mut wl = WikiLinker::new();
-    let mut domain = input::<String>()
-        .msg("Enter a domain (default is en.wikipedia.org/w/): ")
-        .default(String::from("en.wikipedia.org/w"))
-        .get();
-    if domain.ends_with('/') {
-        domain.pop();
-    }
-    let domain = domain;
-    let firstlink = input::<String>()
-        .default(String::from("Tacoma Narrows Bridge"))
-        .msg("Enter a starting page (eg. Tacoma Narrows Bridge): ")
-        .get();
-    let endlink = input::<String>()
-        .default(String::from("24-Hour Analog Dial"))
-        .msg("Enter an ending page (eg. 24-Hour Analog Dial): ")
-        .get();
-    let extra_namespace = input::<String>()
-        .msg("Allow extended namespaces? (if unsure type \"y\") (y\\n): ")
-        .get();
-    let batch = input::<usize>()
-        .repeat_msg("Threads to batch? (Max (and default) is 30, must be greater than 0): ")
-        .inside(1..=30)
-        .default(30)
-        .get();
-    wl.namespaces = if extra_namespace.to_lowercase() == "n" {
-        "0"
+    let args: Vec<String> = args().collect();
+    if args.len() > 1 && args[1] == "-d" {
+        let mut wl = WikiLinker::new();
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(30)
+            .build_global()
+            .unwrap();
+        wl.perform_search("Tacoma Narrows Bridge", "24-Hour Analog Dial");
     } else {
-        "0|14|100"
-    };
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(batch)
-        .build_global()
-        .unwrap();
-    wl.domain = domain.as_str();
-    wl.perform_search(&firstlink, &endlink);
-    drop(wl);
-    let _ = input::<String>().get();
-    println!("exit");
+        let mut wl = WikiLinker::new();
+        let mut domain = input::<String>()
+            .msg("Enter a domain (default is en.wikipedia.org/w/): ")
+            .default(String::from("en.wikipedia.org/w"))
+            .get();
+        if domain.ends_with('/') {
+            domain.pop();
+        }
+        let domain = domain;
+        let firstlink = input::<String>()
+            .default(String::from("Tacoma Narrows Bridge"))
+            .msg("Enter a starting page (eg. Tacoma Narrows Bridge): ")
+            .get();
+        let endlink = input::<String>()
+            .default(String::from("24-Hour Analog Dial"))
+            .msg("Enter an ending page (eg. 24-Hour Analog Dial): ")
+            .get();
+        let extra_namespace = input::<String>()
+            .msg("Allow extended namespaces? (if unsure type \"y\") (y\\n): ")
+            .get();
+        let batch = input::<usize>()
+            .repeat_msg("Threads to batch? (Max (and default) is 30, must be greater than 0): ")
+            .inside(1..=30)
+            .default(30)
+            .get();
+        wl.namespaces = if extra_namespace.to_lowercase() == "n" {
+            "0"
+        } else {
+            "0|14|100"
+        };
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(batch)
+            .build_global()
+            .unwrap();
+        wl.domain = domain.as_str();
+        wl.perform_search(&firstlink, &endlink);
+        let _ = input::<String>().get();
+        println!("exit");
+    }
 }
